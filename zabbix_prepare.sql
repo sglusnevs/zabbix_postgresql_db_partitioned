@@ -1,6 +1,6 @@
 SET TIME ZONE 'UTC';
 
-drop table public.trends_part;
+drop table if exists public.trends_part;
 CREATE TABLE public.trends_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -13,7 +13,7 @@ CREATE TABLE public.trends_part (
 CREATE INDEX trends_part_itemid_clock_idx 
 ON public.trends_part (itemid, clock);
 
-drop table public.trends_uint_part;
+drop table if exists public.trends_uint_part;
 CREATE TABLE IF NOT EXISTS public.trends_uint_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS public.trends_uint_part (
 CREATE INDEX trends_uint_part_clock_idx 
 ON public.trends_uint_part (itemid, clock);
 
-drop table public.history_part;
+drop table if exists public.history_part;
 CREATE TABLE IF NOT EXISTS public.history_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS public.history_part (
 CREATE INDEX history_clock_idx1
 ON public.history_part (clock DESC);
 
-drop table public.history_uint_part;
+drop table if exists public.history_uint_part;
 CREATE TABLE IF NOT EXISTS public.history_uint_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS public.history_uint_part (
 CREATE INDEX history_uint_clock_idx1
 ON public.history_uint_part (clock DESC);
 
-drop table public.history_log_part;
+drop table if exists public.history_log_part;
 CREATE TABLE IF NOT EXISTS public.history_log_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS public.history_log_part (
 CREATE INDEX history_log_part_idx1
 ON public.history_log_part (clock DESC);
 
-drop table public.history_str_part;
+drop table if exists public.history_str_part;
 CREATE TABLE IF NOT EXISTS public.history_str_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS public.history_str_part (
 CREATE INDEX history_str_part_idx1
 ON public.history_str_part (clock DESC);
 
-drop table public.history_text_part;
+drop table if exists public.history_text_part;
 CREATE TABLE IF NOT EXISTS public.history_text_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS public.history_text_part (
 CREATE INDEX history_text_part_idx1
 ON public.history_text_part (clock DESC);
 
-drop table public.history_bin_part;
+drop table if exists public.history_bin_part;
 CREATE TABLE IF NOT EXISTS public.history_bin_part (
     itemid      bigint                                       NOT NULL,
     clock       integer          DEFAULT '0'                 NOT NULL,
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS public.history_bin_part (
 CREATE INDEX history_bin_part_idx1
 ON public.history_bin_part (clock DESC);
 
-drop table public.auditlog_part;
+drop table if exists public.auditlog_part;
 CREATE TABLE IF NOT EXISTS public.auditlog_part (
     auditid       varchar(25)                                NOT NULL,
     userid        bigint                                     NULL,
@@ -123,6 +123,179 @@ CREATE INDEX auditlog_part_2 ON public.auditlog_part (clock);
 CREATE INDEX auditlog_part_3 ON public.auditlog_part (resourcetype, resourceid);
 CREATE INDEX auditlog_part_4 ON public.auditlog_part (recordsetid);
 CREATE INDEX auditlog_part_5 ON public.auditlog_part (ip);
+
+
+-- create one daily partition
+-- child name example: history_part_20260313
+CREATE OR REPLACE FUNCTION public.create_daily_partition(
+    p_parent text,
+    p_day    date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_child_name text;
+    v_from_epoch bigint;
+    v_to_epoch   bigint;
+BEGIN
+    v_child_name := format('%s_%s', p_parent, to_char(p_day, 'YYYYMMDD'));
+    v_from_epoch := extract(epoch FROM p_day::timestamp)::bigint;
+    v_to_epoch   := extract(epoch FROM (p_day + 1)::timestamp)::bigint;
+
+    IF to_regclass(format('public.%I', v_child_name)) IS NULL THEN
+        EXECUTE format(
+            'CREATE TABLE public.%I PARTITION OF public.%I
+             FOR VALUES FROM (%s) TO (%s)',
+            v_child_name, p_parent, v_from_epoch, v_to_epoch
+        );
+    END IF;
+END;
+$$;
+
+-- create one monthly partition
+-- child name example: trends_part_202603
+
+CREATE OR REPLACE FUNCTION public.create_monthly_partition(
+    p_parent text,
+    p_month  date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_month_start date;
+    v_next_month  date;
+    v_child_name  text;
+    v_from_epoch  bigint;
+    v_to_epoch    bigint;
+BEGIN
+    v_month_start := date_trunc('month', p_month)::date;
+    v_next_month  := (date_trunc('month', p_month) + interval '1 month')::date;
+    v_child_name  := format('%s_%s', p_parent, to_char(v_month_start, 'YYYYMM'));
+    v_from_epoch  := extract(epoch FROM v_month_start::timestamp)::bigint;
+    v_to_epoch    := extract(epoch FROM v_next_month::timestamp)::bigint;
+
+    IF to_regclass(format('public.%I', v_child_name)) IS NULL THEN
+        EXECUTE format(
+            'CREATE TABLE public.%I PARTITION OF public.%I
+             FOR VALUES FROM (%s) TO (%s)',
+            v_child_name, p_parent, v_from_epoch, v_to_epoch
+        );
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.ensure_daily_partitions(
+    p_parent   text,
+    p_from_day date,
+    p_to_day   date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    d date;
+BEGIN
+    d := p_from_day;
+    WHILE d <= p_to_day LOOP
+        PERFORM public.create_daily_partition(p_parent, d);
+        d := d + 1;
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.ensure_monthly_partitions(
+    p_parent   text,
+    p_from_day date,
+    p_to_day   date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    d date;
+BEGIN
+    d := date_trunc('month', p_from_day)::date;
+    WHILE d <= date_trunc('month', p_to_day)::date LOOP
+        PERFORM public.create_monthly_partition(p_parent, d);
+        d := (d + interval '1 month')::date;
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.drop_daily_partitions_older_than(
+    p_parent    text,
+    p_keep_from date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r record;
+    v_part_date date;
+BEGIN
+    FOR r IN
+        SELECT c.relname AS child_name
+        FROM pg_inherits i
+        JOIN pg_class p ON p.oid = i.inhparent
+        JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND p.relname = p_parent
+    LOOP
+        IF r.child_name ~ ('^' || p_parent || '_[0-9]{8}$') THEN
+            v_part_date := to_date(right(r.child_name, 8), 'YYYYMMDD');
+
+            IF v_part_date < p_keep_from THEN
+                EXECUTE format(
+                    'ALTER TABLE public.%I DETACH PARTITION public.%I',
+                    p_parent, r.child_name
+                );
+                EXECUTE format(
+                    'DROP TABLE IF EXISTS public.%I',
+                    r.child_name
+                );
+            END IF;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.drop_monthly_partitions_older_than(
+    p_parent    text,
+    p_keep_from date
+) RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r record;
+    v_month_start date;
+    v_month_end   date;
+BEGIN
+    FOR r IN
+        SELECT c.relname AS child_name
+        FROM pg_inherits i
+        JOIN pg_class p ON p.oid = i.inhparent
+        JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND p.relname = p_parent
+    LOOP
+        IF r.child_name ~ ('^' || p_parent || '_[0-9]{6}$') THEN
+            v_month_start := to_date(right(r.child_name, 6) || '01', 'YYYYMMDD');
+            v_month_end   := (v_month_start + interval '1 month')::date;
+
+            IF v_month_end <= p_keep_from THEN
+                EXECUTE format(
+                    'ALTER TABLE public.%I DETACH PARTITION public.%I',
+                    p_parent, r.child_name
+                );
+                EXECUTE format(
+                    'DROP TABLE IF EXISTS public.%I',
+                    r.child_name
+                );
+            END IF;
+        END IF;
+    END LOOP;
+END;
+$$;
+
 
 
 -- create partitions covering current source data range
